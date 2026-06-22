@@ -1,68 +1,77 @@
 # Pulse Rate Analysis
 
-Ayurvedic pulse analysis for multi-sensor CSV data. The project loads patient pulse files, cleans and filters the signals, extracts numerical features, clusters patients into three pulse types, and saves model artifacts and analysis outputs for reuse.
+Ayurvedic pulse analysis system for multi-sensor CSV data. This project cleans pulse signals, extracts features, performs K-Means clustering into three pulse groups, and provides both a Python pipeline and a Streamlit interface.
 
-## Overview
+## Pulse Types
 
-The pipeline classifies each patient into one of three Ayurvedic pulse groups:
+- Vata -> Snake (Vata)
+- Pitta -> Crow/Frog (Pitta)
+- Kapha -> Swan (Kapha)
 
-- Vata: Snake
-- Pitta: Crow/Frog
-- Kapha: Swan
+## Main Entry Points
 
-There are two main entry points:
+- `pluse.py` -> Full end-to-end workflow (data loading to model saving)
+- `app.py` -> Streamlit UI for training, prediction, and result exploration
+- `QUICK_START.py` -> Helper script with usage examples
 
-- `pluse.py`: runs the full batch analysis pipeline and saves artifacts
-- `app.py`: launches the Streamlit UI for training, prediction, and result review
-
-## Project Layout
+## Project Structure
 
 ```text
 Pulse_Rate/
-├── app.py
-├── pluse.py
-├── QUICK_START.py
-├── README.md
-├── requirements.txt
-├── models/
-│   ├── scaler.pkl
-│   ├── pca.pkl
-│   ├── kmeans.pkl
-│   └── model_summary.json
-├── outputs/
-│   ├── cluster_results.csv
-│   ├── eda_summary.csv
-│   └── plots/
-└── Pulse_CSV/
-    ├── deep.csv
-    ├── komal Gadge.csv
-    ├── krishna.csv
-    ├── prerna1.csv
-    └── shreya kherde.csv
+|-- app.py
+|-- pluse.py
+|-- QUICK_START.py
+|-- README.md
+|-- requirements.txt
+|-- SETUP_SUMMARY.md
+|-- models/
+|   |-- scaler.pkl
+|   |-- pca.pkl
+|   |-- kmeans.pkl
+|   `-- model_summary.json
+|-- outputs/
+|   |-- cluster_results.csv
+|   |-- eda_summary.csv
+|   `-- plots/
+|       `-- eda_correlation_top20.png
+`-- Pulse_CSV/
+    |-- deep.csv
+    |-- komal Gadge.csv
+    |-- krishna.csv
+    |-- prerna1.csv
+    `-- shreya kherde.csv
 ```
 
-## Requirements
-
-Install the dependencies with:
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-The project uses pandas, numpy, scipy, scikit-learn, matplotlib, joblib, and streamlit.
+Dependencies include:
 
-## Input Data
+- pandas
+- numpy
+- scipy
+- scikit-learn
+- matplotlib
+- joblib
+- streamlit
 
-Put patient CSV files in `Pulse_CSV/`. The workflow expects these canonical columns after normalization:
+## Input CSV Requirements
+
+Place patient CSV files in `Pulse_CSV/`.
+
+Canonical columns used by the pipeline:
 
 - `Time`
 - `S1`
 - `S2`
 - `S3`
 
-The loader also accepts common aliases such as `timestamp`, `sample`, `sensor1`, `channel1`, `pulse1`, and similar variants.
+The loader can auto-map common aliases such as `timestamp`, `sample`, `sensor1`, `channel1`, `pulse1`, etc.
 
-Example format:
+Example:
 
 ```csv
 Time,S1,S2,S3
@@ -71,97 +80,87 @@ Time,S1,S2,S3
 2,102,97,104
 ```
 
-## Running The Pipeline
-
-Run the full analysis from the command line:
+## Run The Full Pipeline
 
 ```bash
 python pluse.py
 ```
 
-This performs the full workflow:
+Pipeline stages:
 
-1. Load all CSV files in `Pulse_CSV/`
-2. Inspect and clean the data
-3. Apply pulse signal filtering
-4. Extract statistical, frequency, HRV, and shape-based features
-5. Run EDA and save a correlation plot
-6. Scale features and apply PCA
-7. Cluster patients with K-Means using 3 clusters
-8. Save model artifacts and result files
+1. Collect and merge all patient CSV files
+2. Data understanding and quality checks
+3. Cleaning (invalid rows, duplicates, outlier capping)
+4. Signal filtering and peak detection
+5. Feature extraction (statistical, frequency, variability, pulse-shape)
+6. EDA export (summary + correlation dashboard plot)
+7. Feature scaling and PCA
+8. K-Means clustering (K=3)
+9. Cluster-to-pulse mapping (Vata/Pitta/Kapha)
+10. Save models and output reports
 
-## Streamlit App
-
-Launch the UI with:
+## Launch Streamlit App
 
 ```bash
 streamlit run app.py
 ```
 
-The app includes pages for:
+UI pages:
 
-- Home and project summary
-- Training and analysis
-- Predicting a new patient CSV
-- Viewing saved outputs and model information
+- Home
+- Train and Analyze
+- Predict New Patient
+- View Results
 
-## Outputs
+## Generated Artifacts
 
-After a successful run, the project writes these files:
+After running training, these files are generated/updated:
 
-- `outputs/cluster_results.csv`: patient cluster assignments and pulse labels
-- `outputs/eda_summary.csv`: descriptive statistics for extracted features
-- `outputs/plots/eda_correlation_top20.png`: top feature correlation heatmap
-- `models/scaler.pkl`: fitted `StandardScaler`
-- `models/pca.pkl`: fitted PCA transformer
-- `models/kmeans.pkl`: fitted K-Means model
-- `models/model_summary.json`: feature list, cluster mapping, and metrics
+- `models/scaler.pkl`
+- `models/pca.pkl`
+- `models/kmeans.pkl`
+- `models/model_summary.json`
+- `outputs/cluster_results.csv`
+- `outputs/eda_summary.csv`
+- `outputs/plots/eda_correlation_top20.png`
 
-## Model Results
-
-The saved cluster mapping uses the project’s Ayurvedic labels:
-
-- Vata: Snake
-- Pitta: Crow/Frog
-- Kapha: Swan
-
-The model summary includes:
-
-- silhouette score
-- Davies-Bouldin score
-- Calinski-Harabasz score
-- feature count
-- saved feature column order
-
-## Predict A New CSV
-
-Once the model artifacts exist in `models/`, you can predict a new file from Python:
+## Predict A New CSV From Python
 
 ```python
 from pluse import PulseAnalysisWorkflow
 
 workflow = PulseAnalysisWorkflow()
-result = workflow.predict_new_csv("path/to/new_patient.csv", model_dir="models")
+result = workflow.predict_new_csv(
+    file_path="path/to/new_patient.csv",
+    model_dir="models/"
+)
 
 print(result)
 ```
 
-Expected output includes the patient ID, predicted cluster, and pulse type.
+Expected fields in prediction result:
 
-## Reusable Components
+- `patient_id`
+- `cluster`
+- `pulse_type`
 
-The main reusable classes in `pluse.py` are:
+## Reusable Classes
 
-- `PulseDataCollector`: loads and normalizes CSV files
-- `PulseDataCleaner`: removes invalid rows and reduces noise
-- `PulseSignalProcessor`: filters signals and detects peaks
-- `PulseFeatureExtractor`: builds the feature table
-- `PulseAnalysisWorkflow`: runs the end-to-end pipeline
-- `ModelPersistence`: saves and loads trained artifacts
+Key classes in `pluse.py`:
 
-## Configuration
+- `PulseDataCollector`
+- `PulseDataUnderstanding`
+- `PulseDataCleaner`
+- `PulseSignalProcessor`
+- `PulseFeatureExtractor`
+- `FeaturePreprocessor`
+- `PulseClusterer`
+- `ModelPersistence`
+- `PulseAnalysisWorkflow`
 
-Default paths are defined in `pluse.py`:
+## Configuration Notes
+
+Current defaults in `pluse.py`:
 
 ```python
 DEFAULT_DATA_FOLDER = r"C:\Users\ndpac\OneDrive\Desktop\Pulse_CSV"
@@ -170,19 +169,25 @@ OUTPUT_DIR = r"outputs"
 PLOTS_DIR = r"outputs\plots"
 ```
 
-If your data lives somewhere else, update `DEFAULT_DATA_FOLDER` or pass a custom folder to `analyze_pulse_data()`.
+If your CSV files are in this repository folder (`Pulse_Rate/Pulse_CSV`), pass a custom folder path when running from Python, for example:
 
-## Quick Start Script
+```python
+from pluse import analyze_pulse_data
 
-`QUICK_START.py` contains helper examples for:
+results, artifacts = analyze_pulse_data(folder_path="Pulse_CSV")
+```
 
-- running the full analysis pipeline
-- loading a trained model
-- predicting a new patient file
-- extracting features only
+## Quick Start Helper
 
-## Notes
+You can also run:
 
-- The repository already contains sample CSV files in `Pulse_CSV/`.
-- Generated model and output files are expected to be recreated as you rerun the pipeline.
-- If a CSV uses different column names, the loader will try to map common aliases automatically.
+```bash
+python QUICK_START.py
+```
+
+It demonstrates:
+
+- Full workflow run
+- Loading saved model artifacts
+- Predicting a new patient file
+- Extracting features only
