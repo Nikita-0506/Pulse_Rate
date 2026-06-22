@@ -127,6 +127,11 @@ PULSE_DESCRIPTIONS = {
     "Kapha": "Swan — Slow, deep, smooth. Low variability, stable rhythm.",
 }
 
+Y_AXIS_MIN = -700
+Y_AXIS_MAX = 700
+Y_AXIS_TICKS = [Y_AXIS_MIN, 0, Y_AXIS_MAX]
+PLOT_DURATION_MS = 60000
+
 
 def _model_exists(mdir: str) -> bool:
     return all(
@@ -149,15 +154,32 @@ def _capture_run(folder: str, save: bool = True):
     return results, artifacts, log
 
 
+def _to_elapsed_ms(time_series: pd.Series) -> np.ndarray:
+    """Convert time values to elapsed milliseconds from the first sample."""
+    time_values = pd.to_numeric(time_series, errors="coerce")
+    if time_values.isna().all():
+        return np.arange(len(time_series), dtype=float)
+
+    elapsed = (time_values - time_values.min()).to_numpy(dtype=float)
+    if np.isnan(elapsed).any():
+        return np.nan_to_num(elapsed, nan=0.0)
+    return elapsed
+
+
 def _plot_signals(filtered_data: pd.DataFrame, patient_id: str) -> plt.Figure:
     grp = filtered_data[filtered_data["patient_id"] == patient_id].sort_values("Time")
+    elapsed_ms = _to_elapsed_ms(grp["Time"])
+
     fig, axes = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
     for ax, col in zip(axes, SENSOR_COLUMNS):
         filt_col = f"{col}_filtered" if f"{col}_filtered" in grp.columns else col
-        ax.plot(grp["Time"].values, grp[filt_col].values, linewidth=0.8, color="#e74c3c")
+        ax.plot(elapsed_ms, grp[filt_col].values, linewidth=0.8, color="#e74c3c")
         ax.set_ylabel(col, fontsize=9)
+        ax.set_ylim(Y_AXIS_MIN, Y_AXIS_MAX)
+        ax.set_yticks(Y_AXIS_TICKS)
         ax.grid(True, alpha=0.3)
-    axes[-1].set_xlabel("Time")
+    axes[-1].set_xlim(0, PLOT_DURATION_MS)
+    axes[-1].set_xlabel("Time (ms)")
     fig.suptitle(f"Filtered Pulse Signal — {patient_id}", fontsize=11)
     plt.tight_layout()
     return fig
@@ -530,15 +552,20 @@ elif page == "🔮 Predict New Patient":
             st.subheader("📡 Signal Waveform")
             try:
                 uploaded_file.seek(0)
-                preview_raw = pd.read_csv(uploaded_file)
+                preview_raw = PulseDataCollector.normalize_input_schema(pd.read_csv(uploaded_file))
+                elapsed_ms = _to_elapsed_ms(preview_raw["Time"])
                 fig, axes = plt.subplots(3, 1, figsize=(10, 5), sharex=True)
                 for ax, col in zip(axes, SENSOR_COLUMNS):
                     if col in preview_raw.columns:
-                        ax.plot(preview_raw["Time"].values, preview_raw[col].values,
+                        ax.plot(elapsed_ms, preview_raw[col].values,
                                 linewidth=0.8, color=color)
-                        ax.set_ylabel(col, fontsize=9)
-                        ax.grid(True, alpha=0.3)
-                axes[-1].set_xlabel("Time")
+                    ax.set_ylabel(col, fontsize=9)
+
+                    ax.set_ylim(Y_AXIS_MIN, Y_AXIS_MAX)
+                    ax.set_yticks(Y_AXIS_TICKS)
+                    ax.grid(True, alpha=0.3)
+                axes[-1].set_xlim(0, PLOT_DURATION_MS)
+                axes[-1].set_xlabel("Time (ms)")
                 fig.suptitle(f"Raw Pulse Signal — {result['patient_id']}", fontsize=11)
                 plt.tight_layout()
                 st.pyplot(fig, use_container_width=True)
