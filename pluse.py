@@ -826,6 +826,40 @@ class ModelPersistence:
     """Save and load trained pipeline artifacts."""
 
     @staticmethod
+    def _extract_pulse_type(description: str) -> str:
+        match = re.search(r"\(([^)]+)\)", str(description))
+        if match:
+            return match.group(1).strip()
+        return str(description).strip()
+
+    @classmethod
+    def _normalize_cluster_mapping(cls, raw_mapping: Dict) -> Dict[int, Dict]:
+        normalized: Dict[int, Dict] = {}
+
+        for key, value in raw_mapping.items():
+            cluster_id = int(key)
+
+            if isinstance(value, dict):
+                description = str(value.get("description") or value.get("label") or "")
+                pulse_type = str(value.get("type") or cls._extract_pulse_type(description))
+                confidence_score = float(value.get("confidence_score", 0.0))
+                size = int(value.get("size", 0))
+            else:
+                description = str(value)
+                pulse_type = cls._extract_pulse_type(description)
+                confidence_score = 0.0
+                size = 0
+
+            normalized[cluster_id] = {
+                "type": pulse_type,
+                "description": description,
+                "confidence_score": confidence_score,
+                "size": size,
+            }
+
+        return normalized
+
+    @staticmethod
     def save(artifacts: Dict, model_dir: str = MODEL_DIR) -> Dict[str, str]:
         os.makedirs(model_dir, exist_ok=True)
         
@@ -875,13 +909,16 @@ class ModelPersistence:
         
         with open(summary_path, "r", encoding="utf-8") as f:
             summary = json.load(f)
+
+        raw_mapping = summary.get("cluster_mapping", {})
+        cluster_mapping = ModelPersistence._normalize_cluster_mapping(raw_mapping)
         
         artifacts = {
             "scaler": scaler,
             "pca": pca,
             "kmeans": kmeans,
             "feature_columns": summary["feature_columns"],
-            "cluster_mapping": {int(k): v for k, v in summary["cluster_mapping"].items()},
+            "cluster_mapping": cluster_mapping,
             "metrics": summary["metrics"],
         }
         

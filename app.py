@@ -6,6 +6,7 @@ Ayurvedic Pulse Classification: Vata / Pitta / Kapha
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -142,7 +143,7 @@ def _model_exists(mdir: str) -> bool:
     )
 
 
-def _capture_run(folder: str, save: bool = True):
+def _capture_run(folder: str, save: bool = True, target_model_dir: str = MODEL_DIR):
     """Run the full workflow and capture logs in a string."""
     import io as _io
     from contextlib import redirect_stdout
@@ -150,10 +151,104 @@ def _capture_run(folder: str, save: bool = True):
     buf = _io.StringIO()
     with redirect_stdout(buf):
         workflow = PulseAnalysisWorkflow(folder_path=folder)
-        results = workflow.run(save_model=save)
+        results = workflow.run(save_model=False)
         artifacts = workflow.model_artifacts
+        if save and artifacts is not None:
+            ModelPersistence.save(artifacts, model_dir=target_model_dir)
     log = buf.getvalue()
     return results, artifacts, log
+
+
+def _capture_run_uploaded_only(uploaded_file, save: bool, target_model_dir: str):
+    """Run the full workflow only on the uploaded CSV file."""
+    uploaded_name = Path(uploaded_file.name).name
+    uploaded_patient_id = Path(uploaded_name).stem
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        uploaded_file.seek(0)
+        (Path(tmp_dir) / uploaded_name).write_bytes(uploaded_file.read())
+        results, artifacts, log = _capture_run(tmp_dir, save=save, target_model_dir=target_model_dir)
+
+    return results, artifacts, log, uploaded_patient_id
+
+
+def _predict_single_patient(uploaded_file, model_dir: str):
+    """Process the uploaded CSV with saved Scaler/PCA/KMeans and return rich prediction data."""
+    import io as _io
+    from contextlib import redirect_stdout
+
+    patient_id = Path(uploaded_file.name).stem
+    buf = _io.StringIO()
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        uploaded_file.seek(0)
+        tmp_path = Path(tmp_dir) / Path(uploaded_file.name).name
+        tmp_path.write_bytes(uploaded_file.read())
+
+        with redirect_stdout(buf):
+            artifacts = ModelPersistence.load(model_dir)
+
+            one = PulseAnalysisWorkflow._prepare_single_file(str(tmp_path))
+            cleaned = PulseDataCleaner(one).clean()
+            processor = PulseSignalProcessor(cleaned)
+            filtered = processor.apply_filters(fs=100.0)
+            peaks = processor.find_pulse_peaks(distance=30)
+            rr = processor.calculate_rr_intervals(peaks)
+            features = PulseFeatureExtractor(filtered, peaks, rr).extract_all_features()
+
+    log = buf.getvalue()
+
+    if features.empty:
+        raise ValueError(
+            "No features could be extracted from the uploaded file. "
+            "Check that the file has enough valid rows after cleaning."
+        )
+
+    feat_indexed = features.set_index("patient_id")
+    numeric = feat_indexed.select_dtypes(include=[np.number])
+    feature_columns = artifacts["feature_columns"]
+    for col in feature_columns:
+        if col not in numeric.columns:
+            numeric[col] = 0.0
+    numeric = numeric[feature_columns].fillna(0.0)
+
+    scaled = artifacts["scaler"].transform(numeric)
+    pca_result = artifacts["pca"].transform(scaled)
+    pred_cluster = int(artifacts["kmeans"].predict(pca_result)[0])
+    mapping = artifacts["cluster_mapping"][pred_cluster]
+
+    return {
+        "patient_id": patient_id,
+        "cluster": pred_cluster,
+        "pulse_type": mapping["type"],
+        "description": mapping["description"],
+        "confidence_score": float(mapping.get("confidence_score", 0.0)),
+        "filtered_data": filtered,
+        "features_df": features,
+        "peaks_df": peaks,
+        "rr_df": rr,
+        "cluster_mapping": artifacts["cluster_mapping"],
+    }, log
+
+
+def _save_uploaded_to_dataset(uploaded_file, dataset_folder: str) -> Path:
+    """Save uploaded CSV to dataset folder, avoiding filename collisions."""
+    os.makedirs(dataset_folder, exist_ok=True)
+
+    source_name = Path(uploaded_file.name).name
+    stem = Path(source_name).stem
+    suffix = Path(source_name).suffix or ".csv"
+
+    candidate = Path(dataset_folder) / f"{stem}{suffix}"
+    index = 1
+    while candidate.exists():
+        candidate = Path(dataset_folder) / f"{stem}_{index}{suffix}"
+        index += 1
+
+    uploaded_file.seek(0)
+    candidate.write_bytes(uploaded_file.read())
+    uploaded_file.seek(0)
+    return candidate
 
 
 def _to_elapsed_ms(time_series: pd.Series) -> np.ndarray:
@@ -370,7 +465,7 @@ elif page == "🔬 Train & Analyze":
     if run_btn:
         with st.spinner("Running analysis pipeline … this may take a moment"):
             try:
-                results, artifacts, log = _capture_run(data_folder, save=save_model)
+                results, artifacts, log = _capture_run(data_folder, save=save_model, target_model_dir=model_dir)
                 st.session_state["results"] = results
                 st.session_state["artifacts"] = artifacts
                 st.success("✅ Analysis complete!")
@@ -464,15 +559,6 @@ elif page == "🔮 Predict New Patient":
         unsafe_allow_html=True,
     )
 
-    if not _model_exists(model_dir):
-        st.warning(
-            f"⚠️ No trained model found in `{model_dir}`.  \n"
-            "Go to **Train & Analyze** first to train and save a model."
-        )
-        st.stop()
-
-    st.success(f"✅ Trained model loaded from `{model_dir}`")
-
     uploaded_file = st.file_uploader(
         "Upload patient CSV file",
         type=["csv"],
@@ -500,84 +586,164 @@ elif page == "🔮 Predict New Patient":
             st.write("Detected schema mapped to canonical columns: Time, S1, S2, S3")
             st.dataframe(normalized_preview[REQUIRED_COLUMNS].head(10), use_container_width=True)
 
-        predict_btn = st.button("▶ Predict Pulse Type", type="primary")
+        # Option 1 requires a saved model
+        model_exists = _model_exists(model_dir)
 
-        if predict_btn:
-            with st.spinner("Processing …"):
+        col_btn1, col_btn2 = st.columns(2)
+
+        run_uploaded_only_btn = col_btn1.button(
+            "▶ Run Uploaded File Only",
+            type="primary",
+            use_container_width=True,
+            disabled=not model_exists,
+        )
+        if not model_exists:
+            col_btn1.caption(
+                "⚠️ No saved model found. Train a model first in **Train & Analyze**."
+            )
+
+        save_after_run = col_btn2.checkbox(
+            "Save model after full pipeline run",
+            value=True,
+            help="Applies to Option 2 only.",
+        )
+        run_all_btn = col_btn2.button(
+            "▶ Add to Dataset & Run All Files",
+            use_container_width=True,
+        )
+
+        # ------------------------------------------------------------------
+        # Option 1: predict using saved model — no retraining
+        # ------------------------------------------------------------------
+        if run_uploaded_only_btn:
+            with st.spinner("Running pipeline steps and predicting with saved models …"):
                 try:
-                    # Save uploaded file to a temp file for the pipeline
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".csv", delete=False, mode="wb"
-                    ) as tmp:
-                        tmp.write(uploaded_file.read())
-                        tmp_path = tmp.name
-
-                    workflow = PulseAnalysisWorkflow()
-                    result = workflow.predict_new_csv(tmp_path, model_dir=model_dir)
-                    os.unlink(tmp_path)
-
+                    pred_result, log = _predict_single_patient(uploaded_file, model_dir)
                 except Exception as exc:
                     st.error(f"❌ Prediction failed: {exc}")
                     st.stop()
 
-            pulse_type_key = result["pulse_type"].split("(")[-1].rstrip(")")  # e.g. "Vata"
-            color = PULSE_COLORS.get(pulse_type_key, "#555")
-            icon = PULSE_ICONS.get(pulse_type_key, "●")
-            desc = PULSE_DESCRIPTIONS.get(pulse_type_key, "")
+            st.success("✅ Prediction complete using saved Scaler, PCA, and KMeans models.")
+            with st.expander("📋 Pipeline Log", expanded=False):
+                st.code(log, language="text")
 
+            # --- Prediction Summary card ---
             st.markdown("---")
-            st.subheader("🎯 Prediction Result")
+            st.subheader("🎯 Prediction Summary")
+            p_type = pred_result["pulse_type"]
+            p_icon = PULSE_ICONS.get(p_type, "●")
+            p_color = PULSE_COLORS.get(p_type, "#555")
+            p_desc = pred_result["description"]
+            st.markdown(
+                f"<div style='border-left:6px solid {p_color}; padding:1rem 1.5rem; "
+                f"background:#f8f9fa; border-radius:8px;'>"
+                f"<h3 style='color:{p_color}; margin:0'>{p_icon} {p_desc}</h3>"
+                f"<p style='margin:0.4rem 0 0 0; color:#555;'>"
+                f"Patient: <strong>{pred_result['patient_id']}</strong> &nbsp;|&nbsp; "
+                f"Cluster: <strong>{pred_result['cluster']}</strong> &nbsp;|&nbsp; "
+                f"Type: <strong>{p_type}</strong>"
+                f"</p>"
+                f"<p style='margin:0.3rem 0 0 0; color:#888; font-size:0.9rem'>"
+                f"{PULSE_DESCRIPTIONS.get(p_type, '')}</p>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
-            col_res, col_info = st.columns([1, 2])
-            with col_res:
-                st.markdown(
-                    f"""
-                    <div style="background:{color}22; border:2px solid {color};
-                         border-radius:12px; padding:1.5rem; text-align:center;">
-                        <div style="font-size:3rem">{icon}</div>
-                        <div style="font-size:1.4rem; font-weight:bold; color:{color}">
-                            {result['pulse_type']}
-                        </div>
-                        <div style="color:#777; margin-top:0.4rem">
-                            Cluster {result['cluster']}
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-            with col_info:
-                st.markdown(f"**Patient:** `{result['patient_id']}`")
-                st.markdown(f"**Pulse Type:** {icon} {result['pulse_type']}")
-                st.markdown(f"**Description:** {desc}")
-                st.markdown(f"**Assigned Cluster:** {result['cluster']}")
-
-            # Signal waveform preview
+            # --- Signal Waveform ---
             st.markdown("---")
             st.subheader("📡 Signal Waveform")
-            try:
-                uploaded_file.seek(0)
-                preview_raw = PulseDataCollector.normalize_input_schema(pd.read_csv(uploaded_file))
-                elapsed_ms = _to_elapsed_ms(preview_raw["Time"])
-                fig, axes = plt.subplots(3, 1, figsize=SIGNAL_FIGSIZE_PREVIEW, sharex=True)
-                for ax, col in zip(axes, SENSOR_COLUMNS):
-                    if col in preview_raw.columns:
-                        ax.plot(elapsed_ms, preview_raw[col].values,
-                                linewidth=0.8, color=color)
-                    ax.set_ylabel(f"{col} Amplitude (a.u.)", fontsize=11, labelpad=12)
+            fig_sig = _plot_signals(pred_result["filtered_data"], pred_result["patient_id"])
+            st.pyplot(fig_sig, use_container_width=True)
+            plt.close(fig_sig)
 
-                    ax.set_ylim(Y_AXIS_MIN, Y_AXIS_MAX)
-                    ax.set_yticks(Y_AXIS_TICKS)
-                    ax.tick_params(axis="y", labelsize=9, pad=5)
-                    ax.tick_params(axis="x", labelsize=9)
-                    ax.grid(True, alpha=0.3)
-                axes[-1].set_xlim(0, PLOT_DURATION_MS)
-                axes[-1].set_xlabel("Time (ms)", fontsize=11)
-                fig.suptitle(f"Raw Pulse Signal — {result['patient_id']}", fontsize=16, y=0.98)
-                fig.subplots_adjust(left=0.14, right=0.98, top=0.92, bottom=0.10, hspace=0.20)
-                st.pyplot(fig, use_container_width=True)
-                plt.close(fig)
-            except Exception:
-                pass
+            # --- Signal Analysis Results ---
+            st.markdown("---")
+            st.subheader("📊 Signal Analysis Results")
+            tab_peaks, tab_rr = st.tabs(["🔺 Detected Peaks", "⏱️ RR Intervals"])
+            with tab_peaks:
+                if pred_result["peaks_df"].empty:
+                    st.info("No peaks detected for this patient.")
+                else:
+                    st.dataframe(pred_result["peaks_df"], use_container_width=True)
+            with tab_rr:
+                if pred_result["rr_df"].empty:
+                    st.info("No RR intervals computed (not enough peaks).")
+                else:
+                    st.dataframe(pred_result["rr_df"], use_container_width=True)
+
+        # ------------------------------------------------------------------
+        # Option 2: save file to dataset, then run full clustering pipeline
+        # ------------------------------------------------------------------
+        elif run_all_btn:
+            with st.spinner("Saving file and running full pipeline on all files …"):
+                try:
+                    if not os.path.isdir(data_folder):
+                        os.makedirs(data_folder, exist_ok=True)
+
+                    saved_csv = _save_uploaded_to_dataset(uploaded_file, data_folder)
+                    uploaded_patient_id = saved_csv.stem
+                    results, artifacts, log = _capture_run(
+                        data_folder,
+                        save=save_after_run,
+                        target_model_dir=model_dir,
+                    )
+                except Exception as exc:
+                    st.error(f"❌ Pipeline failed: {exc}")
+                    st.stop()
+
+            st.session_state["results"] = results
+            st.session_state["artifacts"] = artifacts
+
+            st.success(
+                f"✅ Uploaded CSV saved as '{saved_csv.name}' and full pipeline completed on all files."
+            )
+            with st.expander("📋 Pipeline Log", expanded=False):
+                st.code(log, language="text")
+
+            st.markdown("---")
+            st.subheader("📈 Full Pipeline Results")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Patients", results.features_df["patient_id"].nunique())
+            m2.metric("Silhouette ↑", f"{results.metrics['silhouette']:.4f}")
+            m3.metric("Davies-Bouldin ↓", f"{results.metrics['davies_bouldin']:.4f}")
+            m4.metric("Calinski-Harabasz ↑", f"{results.metrics['calinski_harabasz']:.1f}")
+
+            cluster_rows = []
+            for i, pid in enumerate(results.features_df["patient_id"].values):
+                cid = int(results.labels[i])
+                info = results.cluster_mapping[cid]
+                pulse_type = info["type"]
+                cluster_rows.append({
+                    "Patient": pid,
+                    "Cluster": cid,
+                    "Pulse Type": PULSE_ICONS.get(pulse_type, "") + " " + info["description"],
+                    "Confidence": f"{info['confidence_score']:.4f}",
+                })
+
+            df_clusters = pd.DataFrame(cluster_rows)
+            st.dataframe(df_clusters, use_container_width=True, height=260)
+
+            uploaded_row = df_clusters[df_clusters["Patient"] == uploaded_patient_id]
+            if not uploaded_row.empty:
+                st.markdown("### 🎯 Newly Added Patient Result")
+                row = uploaded_row.iloc[0]
+                up_type = results.cluster_mapping[int(row["Cluster"])]["type"]
+                up_icon = PULSE_ICONS.get(up_type, "●")
+                up_color = PULSE_COLORS.get(up_type, "#555")
+                st.markdown(
+                    f"<div style='border-left:6px solid {up_color}; padding:0.8rem 1.2rem; "
+                    f"background:#f8f9fa; border-radius:8px'>"
+                    f"<strong style='color:{up_color}'>{up_icon} {row['Pulse Type']}</strong>"
+                    f" &nbsp;|&nbsp; Patient: <strong>{row['Patient']}</strong>"
+                    f" &nbsp;|&nbsp; Cluster: <strong>{row['Cluster']}</strong>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.warning(
+                    "Uploaded patient is not present in final feature set. "
+                    "This can happen if the file has too few valid rows after cleaning."
+                )
 
 
 # ==================================================================
