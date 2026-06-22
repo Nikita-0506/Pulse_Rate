@@ -129,8 +129,10 @@ PULSE_DESCRIPTIONS = {
 
 Y_AXIS_MIN = -700
 Y_AXIS_MAX = 700
-Y_AXIS_TICKS = [Y_AXIS_MIN, 0, Y_AXIS_MAX]
+Y_AXIS_TICKS = list(range(Y_AXIS_MIN, Y_AXIS_MAX + 100, 100))
 PLOT_DURATION_MS = 60000
+SIGNAL_FIGSIZE_MAIN = (14, 10)
+SIGNAL_FIGSIZE_PREVIEW = (14, 9)
 
 
 def _model_exists(mdir: str) -> bool:
@@ -170,18 +172,20 @@ def _plot_signals(filtered_data: pd.DataFrame, patient_id: str) -> plt.Figure:
     grp = filtered_data[filtered_data["patient_id"] == patient_id].sort_values("Time")
     elapsed_ms = _to_elapsed_ms(grp["Time"])
 
-    fig, axes = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
+    fig, axes = plt.subplots(3, 1, figsize=SIGNAL_FIGSIZE_MAIN, sharex=True)
     for ax, col in zip(axes, SENSOR_COLUMNS):
         filt_col = f"{col}_filtered" if f"{col}_filtered" in grp.columns else col
         ax.plot(elapsed_ms, grp[filt_col].values, linewidth=0.8, color="#e74c3c")
-        ax.set_ylabel(col, fontsize=9)
+        ax.set_ylabel(f"{col} Amplitude (a.u.)", fontsize=11, labelpad=12)
         ax.set_ylim(Y_AXIS_MIN, Y_AXIS_MAX)
         ax.set_yticks(Y_AXIS_TICKS)
+        ax.tick_params(axis="y", labelsize=9, pad=5)
+        ax.tick_params(axis="x", labelsize=9)
         ax.grid(True, alpha=0.3)
     axes[-1].set_xlim(0, PLOT_DURATION_MS)
-    axes[-1].set_xlabel("Time (ms)")
-    fig.suptitle(f"Filtered Pulse Signal — {patient_id}", fontsize=11)
-    plt.tight_layout()
+    axes[-1].set_xlabel("Time (ms)", fontsize=11)
+    fig.suptitle(f"Filtered Pulse Signal — {patient_id}", fontsize=16, y=0.98)
+    fig.subplots_adjust(left=0.14, right=0.98, top=0.92, bottom=0.10, hspace=0.20)
     return fig
 
 
@@ -554,20 +558,22 @@ elif page == "🔮 Predict New Patient":
                 uploaded_file.seek(0)
                 preview_raw = PulseDataCollector.normalize_input_schema(pd.read_csv(uploaded_file))
                 elapsed_ms = _to_elapsed_ms(preview_raw["Time"])
-                fig, axes = plt.subplots(3, 1, figsize=(10, 5), sharex=True)
+                fig, axes = plt.subplots(3, 1, figsize=SIGNAL_FIGSIZE_PREVIEW, sharex=True)
                 for ax, col in zip(axes, SENSOR_COLUMNS):
                     if col in preview_raw.columns:
                         ax.plot(elapsed_ms, preview_raw[col].values,
                                 linewidth=0.8, color=color)
-                    ax.set_ylabel(col, fontsize=9)
+                    ax.set_ylabel(f"{col} Amplitude (a.u.)", fontsize=11, labelpad=12)
 
                     ax.set_ylim(Y_AXIS_MIN, Y_AXIS_MAX)
                     ax.set_yticks(Y_AXIS_TICKS)
+                    ax.tick_params(axis="y", labelsize=9, pad=5)
+                    ax.tick_params(axis="x", labelsize=9)
                     ax.grid(True, alpha=0.3)
                 axes[-1].set_xlim(0, PLOT_DURATION_MS)
-                axes[-1].set_xlabel("Time (ms)")
-                fig.suptitle(f"Raw Pulse Signal — {result['patient_id']}", fontsize=11)
-                plt.tight_layout()
+                axes[-1].set_xlabel("Time (ms)", fontsize=11)
+                fig.suptitle(f"Raw Pulse Signal — {result['patient_id']}", fontsize=16, y=0.98)
+                fig.subplots_adjust(left=0.14, right=0.98, top=0.92, bottom=0.10, hspace=0.20)
                 st.pyplot(fig, use_container_width=True)
                 plt.close(fig)
             except Exception:
