@@ -1,4 +1,5 @@
 import glob
+import io
 import json
 import os
 import re
@@ -40,6 +41,85 @@ INPUT_COLUMN_ALIASES = {
 import sys
 for d in [MODEL_DIR, OUTPUT_DIR, PLOTS_DIR]:
     os.makedirs(d, exist_ok=True)
+
+
+# =================================================
+# CSV Loading
+# =================================================
+
+
+def read_pulse_csv(source, **kwargs) -> pd.DataFrame:
+    """Read pulse CSVs even when metadata lines appear before the real header row."""
+    if hasattr(source, "seek"):
+        source.seek(0)
+
+    if hasattr(source, "read"):
+        raw = source.read()
+        if hasattr(source, "seek"):
+            source.seek(0)
+        if isinstance(raw, bytes):
+            text = raw.decode("utf-8-sig", errors="replace")
+        else:
+            text = str(raw)
+    else:
+        path = Path(source)
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+
+    lines = [line.rstrip("\r\n") for line in text.splitlines() if line.strip()]
+    if not lines:
+        return pd.DataFrame()
+
+    candidate_separators = [",", ";", "\t", "|"]
+    header_aliases = {
+        "time",
+        "s1",
+        "s2",
+        "s3",
+        "sensor1",
+        "sensor2",
+        "sensor3",
+        "channel1",
+        "channel2",
+        "channel3",
+        "pulse1",
+        "pulse2",
+        "pulse3",
+        "nadi1",
+        "nadi2",
+        "nadi3",
+        "sample",
+        "sampleindex",
+        "index",
+        "t",
+    }
+
+    for start_idx in range(len(lines)):
+        for sep in candidate_separators:
+            try:
+                df = pd.read_csv(
+                    io.StringIO("\n".join(lines[start_idx:])),
+                    sep=sep,
+                    engine="python",
+                    skip_blank_lines=True,
+                    **kwargs,
+                )
+            except Exception:
+                continue
+
+            if df.empty or df.shape[1] < 2:
+                continue
+
+            normalized_columns = [str(col).strip().lower() for col in df.columns]
+            if any(alias in normalized_columns for alias in header_aliases):
+                return df
+
+    try:
+        if hasattr(source, "read"):
+            source.seek(0)
+            return pd.read_csv(source, **kwargs)
+        return pd.read_csv(source, **kwargs)
+    except Exception:
+        return pd.read_csv(io.StringIO(text), sep=None, engine="python", **kwargs)
 
 
 # =================================================
@@ -123,7 +203,7 @@ class PulseDataCollector:
             patient_id = Path(file_path).stem
 
             try:
-                df = pd.read_csv(file_path)
+                df = read_pulse_csv(file_path)
             except Exception as e:
                 print(f"  [SKIP] Could not read {Path(file_path).name}: {e}")
                 continue
@@ -1072,7 +1152,7 @@ class PulseAnalysisWorkflow:
 
     @staticmethod
     def _prepare_single_file(file_path: str) -> pd.DataFrame:
-        df = pd.read_csv(file_path)
+        df = read_pulse_csv(file_path)
         df = PulseDataCollector.normalize_input_schema(df)
         missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
         if missing:

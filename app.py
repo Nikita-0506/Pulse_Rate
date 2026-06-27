@@ -1,12 +1,8 @@
-"""
-Nadi Pulse Analysis - Streamlit UI
-Ayurvedic Pulse Classification: Vata / Pitta / Kapha
-"""
-
-import io
+# ==================================================
+# Nadi Pulse Analysis 
+# ==================================================
 import json
 import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -15,6 +11,9 @@ import matplotlib
 matplotlib.use("Agg")  # non-interactive backend for Streamlit
 
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -36,6 +35,7 @@ from pluse import (
     SENSOR_COLUMNS,
     REQUIRED_COLUMNS,
     WorkflowResults,
+    read_pulse_csv,
 )
 
 # ------------------------------------------------------------------
@@ -223,6 +223,7 @@ def _predict_single_patient(uploaded_file, model_dir: str):
         "pulse_type": mapping["type"],
         "description": mapping["description"],
         "confidence_score": float(mapping.get("confidence_score", 0.0)),
+        "raw_data": one,
         "filtered_data": filtered,
         "features_df": features,
         "peaks_df": peaks,
@@ -251,38 +252,241 @@ def _save_uploaded_to_dataset(uploaded_file, dataset_folder: str) -> Path:
     return candidate
 
 
-def _to_elapsed_ms(time_series: pd.Series) -> np.ndarray:
-    """Convert time values to elapsed milliseconds from the first sample."""
+def _to_elapsed_seconds(time_series: pd.Series) -> np.ndarray:
+    """Convert time values to elapsed seconds from the first sample."""
     time_values = pd.to_numeric(time_series, errors="coerce")
     if time_values.isna().all():
         return np.arange(len(time_series), dtype=float)
 
     elapsed = (time_values - time_values.min()).to_numpy(dtype=float)
     if np.isnan(elapsed).any():
-        return np.nan_to_num(elapsed, nan=0.0)
+        elapsed = np.nan_to_num(elapsed, nan=0.0)
+
+    if elapsed.max() > 1000:
+        elapsed = elapsed / 1000.0
     return elapsed
 
+def _plot_signals(signal_data: pd.DataFrame, patient_id: str):
 
-def _plot_signals(filtered_data: pd.DataFrame, patient_id: str) -> plt.Figure:
-    grp = filtered_data[filtered_data["patient_id"] == patient_id].sort_values("Time")
-    elapsed_ms = _to_elapsed_ms(grp["Time"])
+    grp = signal_data[signal_data["patient_id"] == patient_id].sort_values("Time")
+    elapsed_sec = _to_elapsed_seconds(grp["Time"])
 
-    fig, axes = plt.subplots(3, 1, figsize=SIGNAL_FIGSIZE_MAIN, sharex=True)
-    for ax, col in zip(axes, SENSOR_COLUMNS):
-        filt_col = f"{col}_filtered" if f"{col}_filtered" in grp.columns else col
-        ax.plot(elapsed_ms, grp[filt_col].values, linewidth=0.8, color="#e74c3c")
-        ax.set_ylabel(f"{col} Amplitude (a.u.)", fontsize=11, labelpad=12)
-        ax.set_ylim(Y_AXIS_MIN, Y_AXIS_MAX)
-        ax.set_yticks(Y_AXIS_TICKS)
-        ax.tick_params(axis="y", labelsize=9, pad=5)
-        ax.tick_params(axis="x", labelsize=9)
-        ax.grid(True, alpha=0.3)
-    axes[-1].set_xlim(0, PLOT_DURATION_MS)
-    axes[-1].set_xlabel("Time (ms)", fontsize=11)
-    fig.suptitle(f"Filtered Pulse Signal — {patient_id}", fontsize=16, y=0.98)
-    fig.subplots_adjust(left=0.14, right=0.98, top=0.92, bottom=0.10, hspace=0.20)
+    colors = {
+        "S1": "#ff2d2d",
+        "S2": "#0066ff",
+        "S3": "#1bb34a",
+    }
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=False,
+        vertical_spacing=0.10,
+        subplot_titles=None
+    )
+
+    for i, col in enumerate(SENSOR_COLUMNS, start=1):
+
+        plot_col = f"{col}_filtered" if f"{col}_filtered" in grp.columns else col
+
+        fig.add_trace(
+
+            go.Scatter(
+                x=elapsed_sec,
+                y=grp[plot_col],
+                mode="lines",
+                line=dict(
+                    color=colors[col],
+                    width=2.5,
+                ),
+                name=col,
+                showlegend=False,
+            ),
+
+            row=i,
+            col=1,
+        )
+        fig.add_hrect(
+            y0=-10000,
+            y1=10000,
+            fillcolor="#fcfdff",
+            opacity=1,
+            layer="below",
+            line_width=1,
+            line_color="#dce6f3",
+            row=i,
+            col=1
+        )
+        plot_col = f"{col}_filtered" if f"{col}_filtered" in grp.columns else col
+
+        ymin = int(np.floor(grp[plot_col].min() / 100.0) * 100)
+        ymax = int(np.ceil(grp[plot_col].max() / 100.0) * 100)
+
+        padding = 100
+        ymin -= padding
+        ymax += padding
+        
+        fig.update_yaxes(
+
+            title_text="<b>Amplitude (a.u.)</b>",
+            title_standoff=30,
+
+            range=[ymin, ymax],
+
+            tickmode="linear",
+            tick0=ymin,
+            dtick=100,
+
+            tickfont=dict(
+            size=14,
+            color="#222222"
+          ),
+
+            title_font=dict(
+            size=20,
+            color="#202020",
+            family="Arial Black"
+           ),
+
+            showgrid=True,
+            gridcolor="#ececec",
+            gridwidth=1,
+
+            minor=dict(
+                dtick=50,
+                showgrid=True,
+                gridcolor="#f6f6f6"
+            ),
+
+            ticks="outside",
+            ticklen=6,
+            tickwidth=1.5,
+
+            showline=True,
+            linewidth=1,
+            linecolor="#d4dce8",
+            mirror=True,
+
+            row=i,
+            col=1
+        )
+
+        fig.update_xaxes(
+            title_text="<b>Time (seconds)</b>",
+            title_standoff=25,
+            range=[0,60],
+            tickmode="linear",
+            tick0=0,
+            dtick=0.8,
+            tickfont=dict(
+            size=11,
+            color="#202020"
+        ),
+            tickangle=0,
+            tickformat=".1f",
+            
+            title_font=dict(
+            size=20,
+            color="#202020",
+            family="Arial Black"
+        ),
+
+            ticks="outside",
+            ticklen=6,
+            tickwidth=1.5,
+
+            showline=True,
+            linewidth=1,
+            linecolor="#d4dce8",
+            mirror=True,
+            
+            showgrid=True,
+            gridcolor="#ececec",
+            gridwidth=1,
+
+            minor=dict(
+                dtick=0.8,
+                showgrid=True,
+                gridcolor="#ececec"
+            ),
+
+            row=i,
+            col=1
+        )
+    fig.update_layout(
+        autosize=True,
+
+        height=900,
+        width=None,
+
+        paper_bgcolor="#f8fbff",
+        plot_bgcolor="#ffffff",
+
+        font=dict(
+            family="Arial",
+            size=15,
+            color="#202020",
+        ),
+
+        margin=dict(
+           l=140,
+           r=60,
+           t=90,
+           b=120,
+        ),
+
+        hovermode="x unified",
+        dragmode="pan",
+
+        title=dict(
+           text=f"<b>Pulse Signal — {patient_id}</b>",
+           x=0.5,
+           font=dict(
+               size=22,
+               color="#8b1c22",
+            ),
+        ),
+    )
+    
+    fig.update_layout(
+    xaxis=dict(
+        rangeslider=dict(
+            visible=False,
+            thickness=0.04,
+            bgcolor="#f7f7f7",
+            bordercolor="#d0d0d0",
+            borderwidth=1
+        ),
+        type="linear"
+    ),
+
+    xaxis2=dict(
+        rangeslider=dict(visible=False)
+    ),
+
+    xaxis3=dict(
+        rangeslider=dict(visible=False)
+    )
+)
     return fig
 
+def _render_scrollable_figure(fig):
+    
+    fig.update_layout(
+        width=None,
+        height=1150,
+        autosize=True
+    )
+    
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config=dict(
+        displayModeBar=False,
+        displaylogo=False,
+        scrollZoom=True
+       )
+    )
 
 def _plot_pca_scatter(pca_features: np.ndarray, labels: np.ndarray, cluster_mapping: dict) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(7, 5))
@@ -522,7 +726,7 @@ elif page == "🔬 Train & Analyze":
     st.subheader("📊 Visualizations")
 
     tab1, tab2, tab3, tab4 = st.tabs(
-        ["🥧 Cluster Distribution", "🔵 PCA Scatter", "🌡️ Feature Correlation", "📡 Signal Waveform"]
+        ["🥧 Cluster Distribution", "🔵 PCA Scatter", "🌡️ Feature Correlation", "🩺 ECG View"]
     )
 
     with tab1:
@@ -541,14 +745,12 @@ elif page == "🔬 Train & Analyze":
         plt.close(fig_heat)
 
     with tab4:
-        patients = sorted(results.filtered_data["patient_id"].unique().tolist())
+        patients = sorted(results.raw_data["patient_id"].unique().tolist())
         sel_patient = st.selectbox("Select patient", patients)
         if sel_patient:
-            fig_sig = _plot_signals(results.filtered_data, sel_patient)
-            st.pyplot(fig_sig, use_container_width=True)
-            plt.close(fig_sig)
-
-
+            fig_sig = _plot_signals(results.raw_data, sel_patient)
+            _render_scrollable_figure(fig_sig)
+            
 # ==================================================================
 # PAGE: Predict New Patient
 # ==================================================================
@@ -567,7 +769,7 @@ elif page == "🔮 Predict New Patient":
 
     if uploaded_file is not None:
         try:
-            preview_df = pd.read_csv(uploaded_file)
+            preview_df = read_pulse_csv(uploaded_file)
             uploaded_file.seek(0)  # reset for later use
         except Exception as e:
             st.error(f"Cannot read uploaded file: {e}")
@@ -652,9 +854,8 @@ elif page == "🔮 Predict New Patient":
             # --- Signal Waveform ---
             st.markdown("---")
             st.subheader("📡 Signal Waveform")
-            fig_sig = _plot_signals(pred_result["filtered_data"], pred_result["patient_id"])
-            st.pyplot(fig_sig, use_container_width=True)
-            plt.close(fig_sig)
+            fig_sig = _plot_signals(pred_result["raw_data"], pred_result["patient_id"])
+            _render_scrollable_figure(fig_sig)
 
             # --- Signal Analysis Results ---
             st.markdown("---")

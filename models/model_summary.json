@@ -66,8 +66,8 @@
     "pulse_duration_ms"
   ],
   "metrics": {
-    "silhouette": 0.276089846440989,
-    "davies_bouldin": 0.9433015283503133,
-    "calinski_harabasz": 5.201371971227669
+    "silhouette": 0.22570773277742445,
+    "davies_bouldin": 0.34225635887144423,
+    "calinski_harabasz": 3.8057571126575596
   }
 }
